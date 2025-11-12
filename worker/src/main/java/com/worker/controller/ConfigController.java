@@ -1,6 +1,7 @@
 package com.worker.controller;
 
 import com.worker.model.ApiResponse;
+import com.worker.model.ReplicaAssignment;
 import com.worker.service.ReplicationService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
@@ -19,21 +20,22 @@ public class ConfigController {
     }
 
     @PostMapping("/replicas")
-    public ResponseEntity<ApiResponse<String>> configureReplicas(@RequestBody List<String> newReplicas) {
+    public ResponseEntity<ApiResponse<String>> configureReplicas(@RequestBody ReplicaAssignment assignment) {
         try {
-            replicationService.setReplicas(newReplicas);
-            System.out.println("Worker replica list updated: " + newReplicas);
-            return ResponseEntity.ok(ApiResponse.success(200, "Replica configuration updated successfully"));
+            replicationService.updateReplicaTargets(assignment.getSyncReplica(), assignment.getAsyncReplica());
+            return ResponseEntity.ok(ApiResponse.success(200, "Replica targets updated"));
         } catch (Exception e) {
             return ResponseEntity.internalServerError().body(ApiResponse.fail(500, e.getMessage()));
         }
     }
 
     @GetMapping("/replicas")
-    public ResponseEntity<ApiResponse<List<String>>> getReplicas() {
+    public ResponseEntity<ApiResponse<ReplicaAssignment>> getReplicas() {
         try {
-            List<String> replicas = replicationService.getReplicas();
-            return ResponseEntity.ok(ApiResponse.success(200, replicas));
+            var assignment = new ReplicaAssignment();
+            assignment.setSyncReplica(replicationService.getSyncReplica());
+            assignment.setAsyncReplica(replicationService.getAsyncReplica());
+            return ResponseEntity.ok(ApiResponse.success(200, assignment));
         } catch (Exception e) {
             return ResponseEntity.internalServerError().body(ApiResponse.fail(500, e.getMessage()));
         }

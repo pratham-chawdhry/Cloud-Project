@@ -1,57 +1,56 @@
 package com.worker.service;
 
 import lombok.Getter;
+import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
-import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 
 @Service
 public class ReplicationService {
 
     private final RestTemplate restTemplate = new RestTemplate();
-    @Getter
-    private final List<String> replicas = new CopyOnWriteArrayList<>();
-    private final ExecutorService executor = Executors.newCachedThreadPool();
+    private final KafkaTemplate<String, String> kafkaTemplate;
 
-    public void setReplicas(List<String> newReplicas) {
-        replicas.clear();
-        replicas.addAll(newReplicas);
+    @Getter
+    private String syncReplica;
+    @Getter
+    private String asyncReplica;
+
+    public ReplicationService(KafkaTemplate<String, String> kafkaTemplate) {
+        this.kafkaTemplate = kafkaTemplate;
     }
 
-    public void replicateToReplicas(String key, String value) {
-        if (replicas.isEmpty()) return;
+    public void updateReplicaTargets(String sync, String async) {
+        this.syncReplica = sync;
+        this.asyncReplica = async;
+    }
 
-        String primaryReplica = replicas.get(0);
+    public void replicateSyncOrThrow(String key, String value) throws Exception {
+        if (syncReplica == null)
+            throw new Exception("No synchronous replica configured");
         try {
             restTemplate.postForEntity(
-                    primaryReplica + "/replicate",
+                    syncReplica + "/replicate",
                     Map.of("key", key, "value", value),
                     String.class
             );
-            System.out.println("Synchronous replication succeeded to " + primaryReplica);
+            System.out.println("SYNC → " + syncReplica);
         } catch (Exception e) {
-            System.err.println("Synchronous replication failed to " + primaryReplica + ": " + e.getMessage());
+            throw new Exception("Synchronous replication failed to " + syncReplica + ": " + e.getMessage(), e);
         }
+    }
 
-        if (replicas.size() > 1) {
-            String secondaryReplica = replicas.get(1);
-            executor.submit(() -> {
-                try {
-                    restTemplate.postForEntity(
-                            secondaryReplica + "/replicate",
-                            Map.of("key", key, "value", value),
-                            String.class
-                    );
-                    System.out.println("Asynchronous replication succeeded to " + secondaryReplica);
-                } catch (Exception e) {
-                    System.err.println("Asynchronous replication failed to " + secondaryReplica + ": " + e.getMessage());
-                }
-            });
+    public void replicateAsync(String key, String value) {
+        if (asyncReplica == null) return;
+
+        try {
+            String payload = key + "|" + value + "|" + asyncReplica;
+            kafkaTemplate.send("replication-events", asyncReplica, payload);
+            System.out.println("ASYNC (queued) → Kafka for " + asyncReplica);
+        } catch (Exception e) {
+            System.err.println("ASYNC enqueue failed: " + e.getMessage());
         }
     }
 }
