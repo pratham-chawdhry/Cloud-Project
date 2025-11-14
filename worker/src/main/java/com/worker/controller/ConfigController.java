@@ -1,12 +1,11 @@
 package com.worker.controller;
 
 import com.worker.model.ApiResponse;
-import com.worker.model.ReplicaAssignment;
+import com.worker.model.WorkerAssignment;
 import com.worker.service.ReplicationService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
-import java.util.List;
 
 @RestController
 @RequestMapping("/config")
@@ -20,7 +19,7 @@ public class ConfigController {
     }
 
     @PostMapping("/replicas")
-    public ResponseEntity<ApiResponse<String>> configureReplicas(@RequestBody ReplicaAssignment assignment) {
+    public ResponseEntity<ApiResponse<String>> configureReplicas(@RequestBody WorkerAssignment assignment) {
         try {
             replicationService.updateReplicaTargets(assignment.getSyncReplica(), assignment.getAsyncReplica());
             return ResponseEntity.ok(ApiResponse.success(200, "Replica targets updated"));
@@ -30,9 +29,9 @@ public class ConfigController {
     }
 
     @GetMapping("/replicas")
-    public ResponseEntity<ApiResponse<ReplicaAssignment>> getReplicas() {
+    public ResponseEntity<ApiResponse<WorkerAssignment>> getReplicas() {
         try {
-            var assignment = new ReplicaAssignment();
+            var assignment = new WorkerAssignment();
             assignment.setSyncReplica(replicationService.getSyncReplica());
             assignment.setAsyncReplica(replicationService.getAsyncReplica());
             return ResponseEntity.ok(ApiResponse.success(200, assignment));
