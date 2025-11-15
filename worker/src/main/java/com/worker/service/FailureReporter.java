@@ -25,6 +25,9 @@ public class FailureReporter {
     @Autowired
     private Environment env;
 
+    @Autowired
+    private ControllerHealthMonitor controllerHealthMonitor;
+
     private String workerUrl;
 
     @EventListener
@@ -43,21 +46,42 @@ public class FailureReporter {
 
 
     public void reportSyncFailure(String failedTarget, String reason) {
-        try {
-            restTemplate.postForEntity(
-                    controllerUrl + "/controller/reportFailure",
-                    Map.of(
-                            "reporter", workerUrl,
-                            "failedTarget", failedTarget,
-                            "reason", reason
-                    ),
-                    String.class
-            );
+        // Check if controller is available before attempting to report
+        if (!controllerHealthMonitor.isControllerAvailable()) {
+            System.out.println("Controller unavailable. Failure report will be retried when controller recovers.");
+            return;
+        }
 
-            System.out.println("Reported sync failure to controller: " + failedTarget);
+        int maxRetries = 3;
+        for (int attempt = 0; attempt < maxRetries; attempt++) {
+            try {
+                restTemplate.postForEntity(
+                        controllerUrl + "/controller/reportFailure",
+                        Map.of(
+                                "reporter", workerUrl,
+                                "failedTarget", failedTarget,
+                                "reason", reason
+                        ),
+                        String.class
+                );
 
-        } catch (Exception ignored) {
-            System.err.println("Failed to report sync failure to controller");
+                System.out.println("Reported sync failure to controller: " + failedTarget);
+                return; // Success
+
+            } catch (Exception e) {
+                if (attempt < maxRetries - 1) {
+                    try {
+                        // Exponential backoff
+                        long delay = (long) Math.pow(2, attempt) * 1000;
+                        Thread.sleep(delay);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        return;
+                    }
+                } else {
+                    System.err.println("Failed to report sync failure to controller after " + maxRetries + " attempts: " + e.getMessage());
+                }
+            }
         }
     }
 }

@@ -1,13 +1,17 @@
 package com.controller.service;
 
 import com.controller.model.WorkerNode;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Lazy;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.context.event.EventListener;
+import org.springframework.http.client.SimpleClientHttpRequestFactory;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
 
-import jakarta.annotation.PostConstruct;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -18,13 +22,12 @@ public class WorkerManager {
 
     private final Map<String, WorkerNode> workers = new ConcurrentHashMap<>();
     private final List<String> workerUrls = new CopyOnWriteArrayList<>();
-    private final RestTemplate restTemplate = new RestTemplate();
 
-    @Autowired
-    private PartitioningService partitioningService;
+    private RestTemplate restTemplate;
 
-    @Autowired
-    private ReplicationManager replicationManager;
+    private final PartitioningService partitioningService;
+    private final ReplicationManager replicationManager;
+    private final StatePersistenceService statePersistenceService;
 
     @Value("${controller.workers:http://localhost:8081,http://localhost:8082,http://localhost:8083,http://localhost:8084}")
     private String workersConfig;
@@ -32,52 +35,136 @@ public class WorkerManager {
     @Value("${controller.heartbeat.timeout:10}")
     private long heartbeatTimeoutSeconds;
 
-    @PostConstruct
-    public void initializeWorkers() {
-        String[] urls = workersConfig.split(",");
-        for (int i = 0; i < urls.length; i++) {
-            String url = urls[i].trim();
-            WorkerNode worker = new WorkerNode(url, i);
-            workers.put(url, worker);
-            workerUrls.add(url);
-            System.out.println("Registered worker: " + url + " with ID: " + i);
-        }
-        configureWorkers();
+    @Value("${controller.state.save.interval:30000}")
+    private long stateSaveIntervalMs;
+
+    @Autowired
+    public WorkerManager(PartitioningService partitioningService,
+                         @Lazy ReplicationManager replicationManager,
+                         StatePersistenceService statePersistenceService) {
+        this.partitioningService = partitioningService;
+        this.replicationManager = replicationManager;
+        this.statePersistenceService = statePersistenceService;
+        initRestTemplate();
+    }
+
+    private void initRestTemplate() {
+        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
+        factory.setConnectTimeout(2000); // 2s connect timeout
+        factory.setReadTimeout(5000);    // 5s read timeout
+        this.restTemplate = new RestTemplate(factory);
     }
 
     /**
-     * Configures each worker with its replica list.
+     * Populate initial worker list. This does NOT perform remote calls.
+     * Called on ApplicationReadyEvent to avoid blocking startup with network calls.
+     * First tries to recover state from disk, otherwise initializes from config.
      */
-    public void configureWorkers() {
-        List<String> activeWorkers = getActiveWorkers();
-        for (String workerUrl : activeWorkers) {
-            List<String> replicas = partitioningService.getReplicaWorkers(workerUrl, activeWorkers);
-            configureWorkerReplicas(workerUrl, replicas);
+    private void initializeWorkers() {
+        // Try to recover state from disk first
+        StatePersistenceService.ControllerState recoveredState = statePersistenceService.loadState();
+
+        if (recoveredState != null && !recoveredState.getWorkers().isEmpty()) {
+            // Recover from saved state
+            System.out.println("Recovering controller state from disk...");
+            workers.putAll(recoveredState.getWorkers());
+            workerUrls.clear();
+            workerUrls.addAll(recoveredState.getWorkerUrls());
+
+            System.out.println("Recovered " + workers.size() + " workers from saved state:");
+            for (WorkerNode worker : workers.values()) {
+                System.out.println("  - " + worker.getUrl() + " (ID: " + worker.getWorkerId() +
+                    ", Active: " + worker.isActive() + ", Replicas: " + worker.getReplicaUrls() + ")");
+            }
+        } else {
+            // Initialize from config (first time or no saved state)
+            System.out.println("Initializing workers from configuration...");
+            String[] urls = workersConfig.split(",");
+            for (int i = 0; i < urls.length; i++) {
+                String url = urls[i].trim();
+                WorkerNode worker = new WorkerNode(url, i);
+                workers.put(url, worker);
+                workerUrls.add(url);
+                System.out.println("Registered worker: " + url + " with ID: " + i);
+            }
+            // Save initial state
+            saveState();
         }
     }
 
     /**
-     * Configures a worker's replica list.
+     * Called after Spring Boot is fully started.
+     * Runs the worker configuration asynchronously with retries.
      */
-    private void configureWorkerReplicas(String workerUrl, List<String> replicaUrls) {
-        WorkerNode worker = workers.get(workerUrl);
-        if (worker != null && isWorkerHealthy(workerUrl)) {
+    @EventListener(ApplicationReadyEvent.class)
+    public void onApplicationReady() {
+        initializeWorkers();
+
+        Thread configThread = new Thread(() -> {
             try {
-                restTemplate.postForEntity(
-                    workerUrl + "/config/replicas",
-                    replicaUrls,
-                    Object.class
-                );
-                worker.setReplicaUrls(replicaUrls);
-                System.out.println("Configured worker " + workerUrl + " with replicas: " + replicaUrls);
-            } catch (Exception e) {
-                System.err.println("Failed to configure replicas for worker " + workerUrl + ": " + e.getMessage());
+                // small delay to let workers (if started separately) have time to come up
+                Thread.sleep(1000);
+            } catch (InterruptedException ignored) {}
+
+            configureWorkersWithRetries();
+        }, "worker-config-thread");
+
+        configThread.setDaemon(true);
+        configThread.start();
+    }
+
+    /**
+     * Configure replica lists for all known workers with retries, but do not abort application startup on failure.
+     */
+    private void configureWorkersWithRetries() {
+        List<String> allWorkers = getAllWorkers();
+        for (String workerUrl : allWorkers) {
+            List<String> replicas = partitioningService.getReplicaWorkers(workerUrl, allWorkers);
+
+            boolean success = false;
+            int attempts = 0;
+            while (!success && attempts < 3) {
+                attempts++;
+                try {
+                    configureWorkerReplicas(workerUrl, replicas);
+                    success = true;
+                } catch (Exception e) {
+                    System.err.println("Attempt " + attempts + " failed to configure " + workerUrl + ": " + e.getMessage());
+                    try {
+                        Thread.sleep(500);
+                    } catch (InterruptedException ignored) {}
+                }
+            }
+            if (!success) {
+                System.err.println("Giving up configuring replicas for " + workerUrl + " after 3 attempts");
             }
         }
     }
 
     /**
-     * Gets the primary worker for a given key.
+     * Configure a worker's replica list via HTTP POST. Throws exception on failure so callers can retry.
+     */
+    private void configureWorkerReplicas(String workerUrl, List<String> replicaUrls) {
+        WorkerNode worker = workers.get(workerUrl);
+        if (worker == null) {
+            throw new IllegalStateException("Worker not found: " + workerUrl);
+        }
+
+        if (!isWorkerHealthy(workerUrl)) {
+            throw new IllegalStateException("Worker not healthy: " + workerUrl);
+        }
+
+        // Will throw RestClientException on failure, which propagates to caller for retry logic.
+        restTemplate.postForEntity(workerUrl + "/config/replicas", replicaUrls, Object.class);
+        worker.setReplicaUrls(replicaUrls);
+        System.out.println("Configured worker " + workerUrl + " with replicas: " + replicaUrls);
+
+        // Save state after configuring replicas
+        saveStateAsync();
+    }
+
+    /**
+     * Returns the primary worker for a given key (delegates to partitioningService).
      */
     public String getWorkerForKey(String key) {
         List<String> activeWorkers = getActiveWorkers();
@@ -85,92 +172,130 @@ public class WorkerManager {
     }
 
     /**
-     * Gets all active worker URLs.
+     * Returns currently active workers (based on health checks).
      */
     public List<String> getActiveWorkers() {
         return workerUrls.stream()
-            .filter(this::isWorkerHealthy)
-            .collect(Collectors.toList());
+                .filter(this::isWorkerHealthy)
+                .collect(Collectors.toList());
     }
 
     /**
-     * Gets all worker URLs (including inactive).
+     * Returns all configured workers (active + inactive).
      */
     public List<String> getAllWorkers() {
         return new ArrayList<>(workerUrls);
     }
 
     /**
-     * Checks if a worker is healthy.
+     * Checks if a worker is healthy based on last heartbeat and active flag.
      */
     public boolean isWorkerHealthy(String workerUrl) {
         WorkerNode worker = workers.get(workerUrl);
         if (worker == null) return false;
-        
-        // Check if heartbeat is stale
+
         if (worker.isHeartbeatStale(heartbeatTimeoutSeconds)) {
             worker.setActive(false);
             return false;
         }
-        
+
         return worker.isActive();
     }
 
     /**
-     * Updates the heartbeat for a worker.
+     * Update heartbeat for a worker. If worker transitions from inactive -> active,
+     * reconfigure workers and trigger recovery logic in replication manager.
      */
     public void updateHeartbeat(String workerUrl) {
         WorkerNode worker = workers.get(workerUrl);
         if (worker != null) {
+            boolean wasActive = worker.isActive();
             worker.updateHeartbeat();
-            // If worker was inactive and just came back, reconfigure
-            if (!worker.isActive()) {
+            if (!wasActive) {
                 worker.setActive(true);
                 System.out.println("Worker " + workerUrl + " is back online");
-                configureWorkers();
+                // Reconfigure worker replica lists asynchronously
+                new Thread(this::configureWorkersWithRetries, "reconfigure-after-recovery").start();
+
                 // Trigger re-replication for keys that belong to this worker
-                replicationManager.handleWorkerRecovery(workerUrl);
+                try {
+                    replicationManager.handleWorkerRecovery(workerUrl);
+                } catch (Exception e) {
+                    System.err.println("Error calling replicationManager.handleWorkerRecovery: " + e.getMessage());
+                }
             }
+            // Save state after heartbeat update (async to avoid blocking)
+            saveStateAsync();
+        } else {
+            System.err.println("updateHeartbeat: unknown worker " + workerUrl);
         }
     }
 
     /**
-     * Marks a worker as failed and handles re-replication.
+     * Mark a worker as failed and trigger re-replication.
      */
     public void markWorkerAsFailed(String workerUrl) {
         WorkerNode worker = workers.get(workerUrl);
         if (worker != null && worker.isActive()) {
             worker.setActive(false);
             System.out.println("Worker " + workerUrl + " marked as failed");
-            // Trigger re-replication
-            replicationManager.handleWorkerFailure(workerUrl);
-            // Reconfigure remaining workers
-            configureWorkers();
+
+            try {
+                replicationManager.handleWorkerFailure(workerUrl);
+            } catch (Exception e) {
+                System.err.println("Error calling replicationManager.handleWorkerFailure: " + e.getMessage());
+            }
+
+            // Reconfigure remaining workers asynchronously
+            new Thread(this::configureWorkersWithRetries, "reconfigure-after-failure").start();
+
+            // Save state after marking worker as failed
+            saveStateAsync();
         }
     }
 
-    /**
-     * Gets worker node by URL.
-     */
     public WorkerNode getWorker(String workerUrl) {
         return workers.get(workerUrl);
     }
 
-    /**
-     * Gets all worker nodes.
-     */
     public Collection<WorkerNode> getAllWorkerNodes() {
         return workers.values();
     }
 
     /**
-     * Gets the mapping of keys to workers for client queries.
+     * Returns a mapping of keys to worker URLs. Currently returns an empty map placeholder
+     * — implement per your client requirements when needed.
      */
     public Map<String, String> getKeyToWorkerMapping() {
-        Map<String, String> mapping = new HashMap<>();
-        List<String> activeWorkers = getActiveWorkers();
-        // Generate mapping for sample keys (or clients can query per key)
-        // For now, return the active workers list
-        return mapping;
+        return new HashMap<>();
+    }
+
+    /**
+     * Saves state to disk periodically (scheduled task).
+     */
+    @Scheduled(fixedDelayString = "${controller.state.save.interval:30000}")
+    public void saveStatePeriodically() {
+        saveState();
+    }
+
+    /**
+     * Saves state to disk synchronously.
+     */
+    private void saveState() {
+        statePersistenceService.saveState(workers, workerUrls);
+    }
+
+    /**
+     * Saves state to disk asynchronously (non-blocking).
+     */
+    private void saveStateAsync() {
+        new Thread(() -> {
+            try {
+                Thread.sleep(100); // Small delay to batch multiple rapid changes
+                saveState();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }, "save-state-thread").start();
     }
 }

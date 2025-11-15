@@ -1,0 +1,29 @@
+{
+  "workerUrls" : [ "http://localhost:8081", "http://localhost:8082", "http://localhost:8083", "http://localhost:8084" ],
+  "workers" : [ {
+    "replicaUrls" : [ ],
+    "workerId" : 3,
+    "lastHeartbeat" : "2025-11-15T16:49:15.637006200Z",
+    "active" : false,
+    "url" : "http://localhost:8084"
+  }, {
+    "replicaUrls" : [ ],
+    "workerId" : 2,
+    "lastHeartbeat" : "2025-11-15T16:49:15.637006200Z",
+    "active" : false,
+    "url" : "http://localhost:8083"
+  }, {
+    "replicaUrls" : [ ],
+    "workerId" : 1,
+    "lastHeartbeat" : "2025-11-15T16:49:15.637006200Z",
+    "active" : false,
+    "url" : "http://localhost:8082"
+  }, {
+    "replicaUrls" : [ ],
+    "workerId" : 0,
+    "lastHeartbeat" : "2025-11-15T16:49:15.637006200Z",
+    "active" : false,
+    "url" : "http://localhost:8081"
+  } ],
+  "lastSaved" : "2025-11-15T18:03:39.450401700Z"
+}
