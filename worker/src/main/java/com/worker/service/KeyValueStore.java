@@ -20,4 +20,8 @@ public class KeyValueStore {
     public Map<String, String> getAll() {
         return store;
     }
+
+    public void remove(String key) {
+        store.remove(key);
+    }
 }

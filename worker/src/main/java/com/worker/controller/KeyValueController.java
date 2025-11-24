@@ -23,7 +23,7 @@ public class KeyValueController {
     @Autowired
     private FailureReporter failureReporter;
 
-    @PutMapping("/put")
+    @PostMapping("/put")
     public ResponseEntity<ApiResponse<String>> put(@RequestBody Map<String, String> body) {
         try {
             String key = body.get("key");
@@ -32,15 +32,20 @@ public class KeyValueController {
             if (key == null || value == null)
                 return ResponseEntity.badRequest().body(ApiResponse.fail(400, "Key and value required"));
 
+            // 1. Local Write
+            keyValueStore.put(key, value);
+
+            // 2. Sync Replication
             try {
                 replicationService.replicateSyncOrThrow(key, value);
             } catch (Exception syncError) {
+                // Rollback local write
+                keyValueStore.remove(key);
                 failureReporter.reportSyncFailure(replicationService.getSyncReplica(), syncError.getMessage());
-                return ResponseEntity.status(503).body(ApiResponse.fail(503, syncError.getMessage()));
+                return ResponseEntity.status(503).body(ApiResponse.fail(503, "Sync replication failed, rolled back: " + syncError.getMessage()));
             }
 
-            keyValueStore.put(key, value);
-
+            // 3. Async Replication (Background)
             replicationService.replicateAsync(key, value);
 
             return ResponseEntity.ok(ApiResponse.success(200, "Stored key=" + key));

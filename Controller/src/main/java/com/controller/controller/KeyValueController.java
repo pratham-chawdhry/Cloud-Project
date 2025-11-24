@@ -62,42 +62,26 @@ import java.util.*;
                 request.put("key", key);
                 request.put("value", value);
 
-                // try primary then fallback to other workers
-                List<String> tried = new ArrayList<>();
-                List<String> activeWorkers = workerManager.getActiveWorkers();
-                // Construct an ordered list: primary first, then the rest (exclude duplicates)
-                LinkedHashSet<String> attemptOrder = new LinkedHashSet<>();
-                attemptOrder.add(primaryWorker);
-                if (activeWorkers != null) {
-                    for (String w : activeWorkers) {
-                        attemptOrder.add(w);
+                try {
+                    logger.debug("Attempting PUT to primary worker {} for key={}", primaryWorker, key);
+                    ResponseEntity<Map> response = restTemplate.postForEntity(primaryWorker + "/put", request, Map.class);
+                    
+                    if (response != null && response.getStatusCode().is2xxSuccessful()) {
+                        logger.info("Stored key={} on worker={}", key, primaryWorker);
+                        return ResponseEntity.ok(ApiResponse.success(200, "Stored key=" + key + " on worker=" + primaryWorker));
+                    } else {
+                        logger.warn("Primary worker {} returned non-2xx for key={}: status={}", primaryWorker, key,
+                                response != null ? response.getStatusCode() : "null-response");
+                        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                                .body(ApiResponse.fail(503, "Primary worker failed to store key"));
                     }
+                } catch (RestClientException re) {
+                    logger.warn("PUT to primary worker {} failed for key={}: {}", primaryWorker, key, re.getMessage());
+                    // If primary is down, we should probably trigger a health check or let the background monitor handle it.
+                    // For now, fail the request.
+                    return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                            .body(ApiResponse.fail(503, "Failed to connect to primary worker: " + re.getMessage()));
                 }
-
-                for (String worker : attemptOrder) {
-                    if (isBlank(worker)) continue;
-                    tried.add(worker);
-                    try {
-                        logger.debug("Attempting PUT to worker {} for key={}", worker, key);
-                        ResponseEntity<Map> response = restTemplate.postForEntity(worker + "/put", request, Map.class);
-                        if (response != null && response.getStatusCode().is2xxSuccessful()) {
-                            logger.info("Stored key={} on worker={}", key, worker);
-                            return ResponseEntity.ok(ApiResponse.success(200, "Stored key=" + key + " on worker=" + worker));
-                        } else {
-                            logger.warn("Worker {} returned non-2xx for key={}: status={}", worker, key,
-                                    response != null ? response.getStatusCode() : "null-response");
-                            // try next worker
-                        }
-                    } catch (RestClientException re) {
-                        logger.warn("PUT to worker {} failed for key={}: {}", worker, key, re.getMessage());
-                        // try next worker
-                    }
-                }
-
-                // if we reached here, all attempts failed
-                logger.error("Failed to store key={} after trying workers: {}", key, tried);
-                return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
-                        .body(ApiResponse.fail(503, "Failed to store key on any worker"));
             } catch (Exception e) {
                 logger.error("Unexpected error in put: {}", e.getMessage(), e);
                 return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)

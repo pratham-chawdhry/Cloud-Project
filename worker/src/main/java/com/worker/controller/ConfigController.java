@@ -19,10 +19,13 @@ public class ConfigController {
     }
 
     @PostMapping("/replicas")
-    public ResponseEntity<ApiResponse<String>> configureReplicas(@RequestBody WorkerAssignment assignment) {
+    public ResponseEntity<ApiResponse<String>> configureReplicas(@RequestBody java.util.List<String> replicas) {
         try {
-            replicationService.updateReplicaTargets(assignment.getSyncReplica(), assignment.getAsyncReplica());
-            return ResponseEntity.ok(ApiResponse.success(200, "Replica targets updated"));
+            String sync = (replicas != null && replicas.size() > 0) ? replicas.get(0) : null;
+            String async = (replicas != null && replicas.size() > 1) ? replicas.get(1) : null;
+            
+            replicationService.updateReplicaTargets(sync, async);
+            return ResponseEntity.ok(ApiResponse.success(200, "Replica targets updated: sync=" + sync + ", async=" + async));
         } catch (Exception e) {
             return ResponseEntity.internalServerError().body(ApiResponse.fail(500, e.getMessage()));
         }
