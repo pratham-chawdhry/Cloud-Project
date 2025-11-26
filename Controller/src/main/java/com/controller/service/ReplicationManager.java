@@ -28,89 +28,66 @@ public class ReplicationManager {
 
     private RestTemplate createRestTemplateWithTimeouts() {
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
-        factory.setConnectTimeout(2000); // 2s
-        factory.setReadTimeout(5000);    // 5s
+        factory.setConnectTimeout(2000);
+        factory.setReadTimeout(5000);
         return new RestTemplate(factory);
     }
 
-    /**
-     * Handles worker failure by re-replicating missing keys from remaining replicas.
-     * Runs in a background thread to avoid blocking caller.
-     */
+
+    /* ============================================================
+       WORKER FAILURE HANDLING – RECOVERY OF LOST REPLICAS
+    ============================================================= */
     public void handleWorkerFailure(String failedWorkerUrl) {
+
         System.out.println("Handling failure of worker: " + failedWorkerUrl);
 
         executor.submit(() -> {
             try {
-                Thread.sleep(1000); // brief delay
+                Thread.sleep(1000);
 
                 List<String> activeWorkers = workerManager.getActiveWorkers();
-                // Exclude the failed worker if still present
-                activeWorkers.removeIf(url -> url.equals(failedWorkerUrl));
+                activeWorkers.remove(failedWorkerUrl);
 
                 if (activeWorkers.isEmpty()) {
                     System.err.println("No active workers available for re-replication");
                     return;
                 }
 
-                Map<String, String> allData = new HashMap<>();
-                Set<String> processedKeys = new HashSet<>();
+                Map<String, String> combinedData = new HashMap<>();
 
-                // Collect data from all active workers
                 for (String workerUrl : activeWorkers) {
-                    try {
-                        Map<String, Object> response = restTemplate.getForObject(workerUrl + "/status", Map.class);
-                        if (response != null && response.containsKey("payload")) {
-                            Object payloadObj = response.get("payload");
-                            if (payloadObj instanceof Map) {
-                                @SuppressWarnings("unchecked")
-                                Map<String, String> data = (Map<String, String>) payloadObj;
-                                if (data != null && !data.isEmpty()) {
-                                    allData.putAll(data);
-                                }
-                            }
-                        }
-                    } catch (Exception e) {
-                        System.err.println("Error reading data from worker " + workerUrl + ": " + e.getMessage());
-                    }
+                    Map<String, String> data = fetchWorkerKV(workerUrl);
+                    if (data != null) combinedData.putAll(data);
                 }
 
-                // Re-replicate keys to ensure each key has at least required replicas
-                for (Map.Entry<String, String> entry : allData.entrySet()) {
+                for (Map.Entry<String, String> entry : combinedData.entrySet()) {
                     String key = entry.getKey();
                     String value = entry.getValue();
 
-                    if (processedKeys.contains(key)) continue;
-                    processedKeys.add(key);
+                    String primary = partitioningService.getWorkerForKey(key, activeWorkers);
+                    List<String> replicas = partitioningService.getReplicaWorkers(primary, activeWorkers);
 
-                    String primaryWorker = partitioningService.getWorkerForKey(key, activeWorkers);
-                    List<String> replicas = partitioningService.getReplicaWorkers(primaryWorker, activeWorkers);
-
-                    ensureReplication(key, value, primaryWorker, replicas);
+                    ensureReplication(key, value, primary, replicas);
                 }
 
-                System.out.println("Re-replication completed for " + processedKeys.size() + " keys");
+                System.out.println("Re-replication after failure completed.");
 
             } catch (Exception e) {
                 System.err.println("Error in handleWorkerFailure: " + e.getMessage());
-                e.printStackTrace();
             }
         });
     }
 
-    /**
-     * Ensures the key exists on primary and required number of replicas.
-     * Returns true if replication succeeded to the minimum required count.
-     */
-    private boolean ensureReplication(String key, String value, String primaryWorker, List<String> replicas) {
+
+    /* ============================================================
+       ENSURE REPLICATION FACTOR FOR A KEY
+    ============================================================= */
+    private boolean ensureReplication(String key, String value, String primary, List<String> replicas) {
         int successCount = 0;
 
-        // Ensure primary has the data
-        if (replicateToWorker(key, value, primaryWorker)) {
-            successCount++;
-        }
+        // Primary
+        if (replicateToWorker(key, value, primary)) successCount++;
 
-        // Ensure up to 2 replicas (adjust per your replication factor)
         int replicaCount = 0;
         for (String replica : replicas) {
             if (replicaCount >= 2) break;
@@ -121,42 +98,39 @@ public class ReplicationManager {
         }
 
         if (successCount < 2) {
-            System.err.println("Warning: Key " + key + " has only " + successCount + " replicas (need at least 2)");
+            System.err.println("Warning: Key " + key + " has only " + successCount + " replicas (needs 2)");
             return false;
         }
 
         return true;
     }
 
-    /**
-     * Replicates a single key/value to a worker via HTTP POST.
-     */
+
+    /* ============================================================
+       SEND KEY/VAL TO TARGET WORKER
+    ============================================================= */
     private boolean replicateToWorker(String key, String value, String workerUrl) {
         if (workerUrl == null) return false;
-        if (!workerManager.isWorkerHealthy(workerUrl)) {
-            return false;
-        }
+        if (!workerManager.isWorkerActive(workerUrl)) return false;
 
         try {
-            Map<String, String> request = new HashMap<>();
-            request.put("key", key);
-            request.put("value", value);
+            Map<String, String> req = Map.of("key", key, "value", value);
 
-            restTemplate.postForEntity(workerUrl + "/replicate", request, Object.class);
+            restTemplate.postForEntity(workerUrl + "/replicate", req, Object.class);
             return true;
+
         } catch (RestClientException e) {
-            System.err.println("Failed to replicate key " + key + " to worker " + workerUrl + ": " + e.getMessage());
-            return false;
-        } catch (Exception e) {
-            System.err.println("Unexpected error replicating key " + key + " to " + workerUrl + ": " + e.getMessage());
+            System.err.println("Failed replicate " + key + " -> " + workerUrl + " : " + e.getMessage());
             return false;
         }
     }
 
-    /**
-     * Handles worker recovery by ensuring the recovered worker receives keys it should own.
-     */
+
+    /* ============================================================
+       WORKER RECOVERY HANDLING
+    ============================================================= */
     public void handleWorkerRecovery(String recoveredWorkerUrl) {
+
         System.out.println("Handling recovery of worker: " + recoveredWorkerUrl);
 
         executor.submit(() -> {
@@ -166,37 +140,59 @@ public class ReplicationManager {
                 for (String workerUrl : activeWorkers) {
                     if (workerUrl.equals(recoveredWorkerUrl)) continue;
 
-                    try {
-                        Map<String, Object> response = restTemplate.getForObject(workerUrl + "/status", Map.class);
-                        if (response != null && response.containsKey("payload")) {
-                            Object payloadObj = response.get("payload");
-                            if (payloadObj instanceof Map) {
-                                @SuppressWarnings("unchecked")
-                                Map<String, String> data = (Map<String, String>) payloadObj;
+                    Map<String, String> data = fetchWorkerKV(workerUrl);
+                    if (data == null) continue;
 
-                                if (data != null && !data.isEmpty()) {
-                                    for (Map.Entry<String, String> entry : data.entrySet()) {
-                                        String key = entry.getKey();
-                                        String value = entry.getValue();
+                    for (Map.Entry<String, String> entry : data.entrySet()) {
+                        String key = entry.getKey();
+                        String value = entry.getValue();
 
-                                        String primaryWorker = partitioningService.getWorkerForKey(key, activeWorkers);
-                                        List<String> replicas = partitioningService.getReplicaWorkers(primaryWorker, activeWorkers);
+                        String primary = partitioningService.getWorkerForKey(key, activeWorkers);
+                        List<String> replicas = partitioningService.getReplicaWorkers(primary, activeWorkers);
 
-                                        if (recoveredWorkerUrl.equals(primaryWorker) || replicas.contains(recoveredWorkerUrl)) {
-                                            replicateToWorker(key, value, recoveredWorkerUrl);
-                                        }
-                                    }
-                                }
-                            }
+                        // If recovered worker should hold this key
+                        if (recoveredWorkerUrl.equals(primary) ||
+                                replicas.contains(recoveredWorkerUrl)) {
+
+                            replicateToWorker(key, value, recoveredWorkerUrl);
                         }
-                    } catch (Exception e) {
-                        System.err.println("Error during worker recovery from " + workerUrl + ": " + e.getMessage());
                     }
                 }
+
+                System.out.println("Recovery replication completed for " + recoveredWorkerUrl);
+
             } catch (Exception e) {
                 System.err.println("Error in handleWorkerRecovery: " + e.getMessage());
-                e.printStackTrace();
             }
         });
+    }
+
+
+    /* ============================================================
+       FETCH /status FROM A WORKER SAFELY
+    ============================================================= */
+    private Map<String, String> fetchWorkerKV(String workerUrl) {
+        if (!workerManager.isWorkerActive(workerUrl)) return null;
+
+        try {
+            Map<String, Object> resp =
+                    restTemplate.getForObject(workerUrl + "/status", Map.class);
+
+            if (resp == null) return null;
+            if (!resp.containsKey("payload")) return null;
+
+            Object payloadObj = resp.get("payload");
+            if (payloadObj instanceof Map<?, ?> payload) {
+                @SuppressWarnings("unchecked")
+                Map<String, String> casted = (Map<String, String>) payload;
+                return casted;
+            }
+
+            return null;
+
+        } catch (Exception e) {
+            System.err.println("Error fetching status from " + workerUrl + ": " + e.getMessage());
+            return null;
+        }
     }
 }

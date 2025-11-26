@@ -36,3 +36,6 @@ build/
 
 ### Mac OS ###
 .DS_Store
+
+Controller/controller-state.json
+Controller/controller-state.json.tmp
