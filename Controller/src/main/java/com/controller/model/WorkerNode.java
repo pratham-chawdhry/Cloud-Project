@@ -8,26 +8,25 @@ import java.util.List;
 @Data
 public class WorkerNode {
     private String url;
-    private boolean active;
-    private Instant lastHeartbeat;
+    private transient boolean active;
+    private transient long lastHeartbeat;
     private List<String> replicaUrls;
-    private int workerId;
+    private String workerId;
 
-    public WorkerNode(String url, int workerId) {
+    public WorkerNode(String url, String workerId) {
         this.url = url;
         this.workerId = workerId;
         this.active = true;
-        this.lastHeartbeat = Instant.now();
+        this.lastHeartbeat = System.currentTimeMillis();
         this.replicaUrls = new ArrayList<>();
     }
 
     public void updateHeartbeat() {
-        this.lastHeartbeat = Instant.now();
+        this.lastHeartbeat = System.currentTimeMillis();
         this.active = true;
     }
 
     public boolean isHeartbeatStale(long timeoutSeconds) {
-        if (lastHeartbeat == null) return true;
-        return Instant.now().getEpochSecond() - lastHeartbeat.getEpochSecond() > timeoutSeconds;
+        return System.currentTimeMillis() - lastHeartbeat > timeoutSeconds * 1000L;
     }
 }
