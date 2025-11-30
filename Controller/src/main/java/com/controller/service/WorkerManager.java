@@ -1,182 +1,137 @@
 package com.controller.service;
 
 import com.controller.model.WorkerNode;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Service;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
-import org.springframework.http.client.SimpleClientHttpRequestFactory;
-import org.springframework.scheduling.annotation.Scheduled;
-import org.springframework.stereotype.Service;
-import org.springframework.web.client.RestTemplate;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.stream.Collectors;
 
 @Service
 public class WorkerManager {
 
     private final Map<String, WorkerNode> workers = new ConcurrentHashMap<>();
-    private final List<String> workerUrls = new CopyOnWriteArrayList<>();
-    private RestTemplate restTemplate;
+    private final List<String> workerUrls = new ArrayList<>();
 
-    private final PartitioningService partitioningService;
-    private final StatePersistenceService statePersistenceService;
-    private final ClusterResyncService clusterResyncService;
     private final WorkerRegistry registry;
-
-    @Value("${controller.heartbeat.timeout:10}")
-    private long heartbeatTimeoutSeconds;
+    private final StatePersistenceService persistence;
+    private final ClusterResyncService resync;
+    private final PartitioningService partition;
 
     @Autowired
-    public WorkerManager(PartitioningService partitioningService,
-                         StatePersistenceService statePersistenceService,
-                         ClusterResyncService clusterResyncService,
-                         WorkerRegistry registry) {
-        this.partitioningService = partitioningService;
-        this.statePersistenceService = statePersistenceService;
-        this.clusterResyncService = clusterResyncService;
+    public WorkerManager(WorkerRegistry registry,
+                         StatePersistenceService persistence,
+                         ClusterResyncService resync,
+                         PartitioningService partition) {
         this.registry = registry;
-        initRestTemplate();
-    }
-
-    private void initRestTemplate() {
-        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
-        factory.setConnectTimeout(2000);
-        factory.setReadTimeout(5000);
-        this.restTemplate = new RestTemplate(factory);
+        this.persistence = persistence;
+        this.resync = resync;
+        this.partition = partition;
     }
 
     @EventListener(ApplicationReadyEvent.class)
-    public void onReady() {
-        loadSavedWorkers();
-        clusterResyncService.forceResync();
+    public void init() {
+        loadState();
+        resync.forceResync();
     }
 
-    private void loadSavedWorkers() {
-        var saved = statePersistenceService.loadState();
-        if (saved == null) return;
+    private void loadState() {
+        var state = persistence.loadState();
+        if (state == null) return;
 
         workers.clear();
-        workers.putAll(saved.getWorkers());
-
-        for (WorkerNode node : workers.values()) {
-            node.setActive(true);
-            node.updateHeartbeat();
-            registry.restoreWorker(node.getWorkerId(), node.getUrl());
-        }
-
+        workers.putAll(state.getWorkers());
         workerUrls.clear();
-        workerUrls.addAll(saved.getWorkerUrls());
+        workerUrls.addAll(state.getWorkerUrls());
 
-        for (WorkerNode node : workers.values()) {
-            node.setActive(true);
-            node.updateHeartbeat();
-            registry.restoreWorker(node.getWorkerId(), node.getUrl());
-        }
+        workers.values().forEach(n -> registry.restore(n.getWorkerId(), n.getUrl()));
     }
 
-    private String randomId() {
+    private String id() {
         return "worker-" + UUID.randomUUID().toString().substring(0, 8);
     }
 
-    public synchronized String registerNewWorker(String url) {
-        WorkerNode existing = workers.get(url);
+    public synchronized String register(String url) {
+        System.out.println("[WorkerManager] register url=" + url +
+                " contains=" + workers.containsKey(url) +
+                " regId=" + registry.getWorkerIdByUrl(url));
 
-        if (existing != null) {
-            existing.updateHeartbeat();
-            existing.setActive(true);
-            registry.updateHeartbeat(existing.getWorkerId());
-            saveStateAsync();
-            clusterResyncService.resyncCluster();
-            return existing.getWorkerId();
+        // case: stale WorkerNode but registry lost workerId → treat as new
+        if (workers.containsKey(url) && registry.getWorkerIdByUrl(url) == null) {
+            System.out.println("[WorkerManager] stale entry, cleaning: " + url);
+            workers.remove(url);
+            workerUrls.remove(url);
         }
 
-        String id = randomId();
-        WorkerNode node = new WorkerNode(url, id);
-        node.setActive(true);
+        // existing valid
+        if (workers.containsKey(url)) {
+            WorkerNode n = workers.get(url);
+            registry.updateHeartbeat(n.getWorkerId());
+            save();
+            resync.resyncCluster();
+            return n.getWorkerId();
+        }
+
+        // new worker
+        String wid = id();
+        WorkerNode node = new WorkerNode(url, wid);
         node.updateHeartbeat();
 
         workers.put(url, node);
-        workerUrls.add(url);
-        registry.register(id, url);
+        if (!workerUrls.contains(url)) workerUrls.add(url);
+        registry.register(wid, url);
 
-        saveStateAsync();
-        clusterResyncService.resyncCluster();
-        return id;
+        save();
+        resync.resyncCluster();
+
+        System.out.println("[WorkerManager] NEW worker id=" + wid + " url=" + url);
+        return wid;
     }
 
-    public void updateHeartbeat(String url) {
-        WorkerNode node = workers.get(url);
-        if (node == null) return;
+    public void heartbeat(String url) {
+        WorkerNode n = workers.get(url);
+        if (n == null) return;
 
-        boolean wasInactive = !node.isActive();
-
-        node.updateHeartbeat();
-        node.setActive(true);
-        registry.updateHeartbeat(node.getWorkerId());
-
-        if (wasInactive)
-            clusterResyncService.resyncCluster();
-
-        saveStateAsync();
-    }
-
-    public boolean isWorkerHealthy(String url) {
-        WorkerNode node = workers.get(url);
-        if (node == null) return false;
-
-        if (node.isHeartbeatStale(heartbeatTimeoutSeconds)) {
-            node.setActive(false);
-            return false;
-        }
-        return node.isActive();
-    }
-
-    public void markWorkerAsFailed(String url) {
-        WorkerNode node = workers.get(url);
-        if (node == null || !node.isActive()) return;
-
-        node.setActive(false);
-        registry.markDead(node.getWorkerId());
-        clusterResyncService.resyncCluster();
-        saveStateAsync();
+        n.updateHeartbeat();
+        registry.updateHeartbeat(n.getWorkerId());
+        save();
+        resync.resyncCluster();
     }
 
     public List<String> getActiveWorkers() {
-        return workerUrls.stream()
-                .filter(this::isWorkerHealthy)
-                .collect(Collectors.toList());
+        List<String> result = new ArrayList<>();
+        for (String id : registry.getAliveWorkerIds()) {
+            String url = registry.getUrl(id);
+            if (url != null) result.add(url);
+        }
+        return result;
+    }
+
+    public String getWorkerForKey(String key) {
+        List<String> active = getActiveWorkers();
+        if (active.isEmpty()) return null;
+        return partition.getWorkerForKey(key, active);
     }
 
     public List<String> getAllWorkers() {
         return new ArrayList<>(workerUrls);
     }
 
-    public Collection<WorkerNode> getAllWorkerNodes() {
+    public Collection<WorkerNode> getWorkerNodes() {
         return workers.values();
     }
 
-    @Scheduled(fixedDelayString = "${controller.state.save.interval:30000}")
-    public void saveStatePeriodically() {
-        saveState();
+    public synchronized void removeByUrl(String url) {
+        WorkerNode removed = workers.remove(url);
+        boolean removedList = workerUrls.remove(url);
+        System.out.println("[WorkerManager] removeByUrl url=" + url +
+                " removed=" + (removed != null) +
+                " removedList=" + removedList);
     }
 
-    private void saveState() {
-        statePersistenceService.saveState(workers, workerUrls);
-    }
-
-    private void saveStateAsync() {
-        new Thread(() -> {
-            try { Thread.sleep(100); } catch (Exception ignored) {}
-            saveState();
-        }).start();
-    }
-
-    public String getWorkerForKey(String key) {
-        var alive = getActiveWorkers();
-        return alive.isEmpty() ? null : partitioningService.getWorkerForKey(key, alive);
+    private void save() {
+        persistence.saveState(workers, workerUrls);
     }
 }

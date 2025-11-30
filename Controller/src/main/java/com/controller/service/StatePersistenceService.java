@@ -7,7 +7,6 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.io.File;
-import java.io.IOException;
 import java.nio.file.Files;
 import java.util.Collections;
 import java.util.List;
@@ -31,58 +30,39 @@ public class StatePersistenceService {
         private long lastSaved;
 
         public ControllerState() {}
-
         public ControllerState(Map<String, WorkerNode> workers, List<String> workerUrls) {
             this.workers = workers;
             this.workerUrls = workerUrls;
             this.lastSaved = System.currentTimeMillis();
         }
-
-        public Map<String, WorkerNode> getWorkers() { return workers; }
-        public List<String> getWorkerUrls() { return workerUrls; }
+        public Map<String, WorkerNode> getWorkers() { return workers == null ? Collections.emptyMap() : workers; }
+        public List<String> getWorkerUrls() { return workerUrls == null ? Collections.emptyList() : workerUrls; }
         public long getLastSaved() { return lastSaved; }
-        public void setWorkers(Map<String, WorkerNode> workers) { this.workers = workers; }
-        public void setWorkerUrls(List<String> workerUrls) { this.workerUrls = workerUrls; }
-        public void setLastSaved(long lastSaved) { this.lastSaved = lastSaved; }
     }
 
     public synchronized void saveState(Map<String, WorkerNode> workers, List<String> workerUrls) {
         ControllerState state = new ControllerState(workers, workerUrls);
         File f = new File(stateFilePath);
         try {
-            // ensure parent
             if (f.getParentFile() != null) f.getParentFile().mkdirs();
             mapper.writeValue(f, state);
-            System.out.println("State saved to " + f.getAbsolutePath());
-        } catch (IOException e) {
-            System.err.println("Failed to save state to " + f.getAbsolutePath() + ": " + e.getMessage());
-            // fallback: try to save to fallbackDir with timestamp
+        } catch (Exception e) {
             try {
                 Files.createDirectories(new File(fallbackDir).toPath());
                 File fallback = new File(fallbackDir, "controller-state-fallback-" + System.currentTimeMillis() + ".json");
                 mapper.writeValue(fallback, state);
-                System.out.println("State saved successfully (fallback) to " + fallback.getAbsolutePath());
-            } catch (IOException ex) {
-                System.err.println("Fallback save also failed: " + ex.getMessage());
-            }
+            } catch (Exception ignored) {}
         }
     }
 
     public synchronized ControllerState loadState() {
         File f = new File(stateFilePath);
-        if (!f.exists()) {
-            System.out.println("No state file at " + f.getAbsolutePath());
-            return null;
-        }
+        if (!f.exists()) return null;
         try {
             ControllerState s = mapper.readValue(f, ControllerState.class);
-            // Defensive: ensure non-null collections
-            if (s.getWorkers() == null) s.setWorkers(Collections.emptyMap());
-            if (s.getWorkerUrls() == null) s.setWorkerUrls(Collections.emptyList());
-            System.out.println("State loaded from " + f.getAbsolutePath() + ", workers=" + s.getWorkers().size());
+            if (s.getWorkers() == null) s = new ControllerState(Collections.emptyMap(), s.getWorkerUrls());
             return s;
-        } catch (IOException e) {
-            System.err.println("Failed to read state file: " + e.getMessage());
+        } catch (Exception e) {
             return null;
         }
     }

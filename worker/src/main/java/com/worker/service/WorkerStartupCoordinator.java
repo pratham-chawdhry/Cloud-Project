@@ -12,9 +12,6 @@ public class WorkerStartupCoordinator {
     private WorkerRegistrar registrar;
 
     @Autowired
-    private HeartbeatService heartbeatService;
-
-    @Autowired
     private KafkaHeartbeatGate kafkaHeartbeatGate;
 
     @EventListener(ApplicationReadyEvent.class)
@@ -23,9 +20,6 @@ public class WorkerStartupCoordinator {
 
         // 1) Register with controller (must succeed or throw)
         registrar.registerAfterReady();
-
-        // 2) Start HTTP heartbeat thread only after successful registration
-        heartbeatService.startHeartbeatThread();
 
         // 3) Enable Kafka heartbeats now worker is registered
         kafkaHeartbeatGate.enableKafkaHeartbeats();

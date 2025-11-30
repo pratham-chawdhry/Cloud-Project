@@ -3,32 +3,39 @@
     "http://localhost:8084" : {
       "url" : "http://localhost:8084",
       "replicaUrls" : [ ],
-      "workerId" : "worker-e8c80ed7",
+      "workerId" : "worker-9e0146aa",
       "active" : true,
-      "lastHeartbeat" : 1764209596663
+      "lastHeartbeat" : 1764541036089
     },
     "http://localhost:8083" : {
       "url" : "http://localhost:8083",
       "replicaUrls" : [ ],
-      "workerId" : "worker-e2b09828",
+      "workerId" : "worker-d7321d98",
       "active" : true,
-      "lastHeartbeat" : 1764209599458
+      "lastHeartbeat" : 1764541040675
+    },
+    "http://localhost:8086" : {
+      "url" : "http://localhost:8086",
+      "replicaUrls" : [ ],
+      "workerId" : "worker-eaa6f8f4",
+      "active" : true,
+      "lastHeartbeat" : 1764541940871
     },
     "http://localhost:8082" : {
       "url" : "http://localhost:8082",
       "replicaUrls" : [ ],
-      "workerId" : "worker-3fffb4c4",
+      "workerId" : "worker-6705be2b",
       "active" : true,
-      "lastHeartbeat" : 1764209603570
+      "lastHeartbeat" : 1764541043431
     },
     "http://localhost:8081" : {
       "url" : "http://localhost:8081",
       "replicaUrls" : [ ],
-      "workerId" : "worker-951510e4",
+      "workerId" : "worker-97914558",
       "active" : true,
-      "lastHeartbeat" : 1764209606187
+      "lastHeartbeat" : 1764541044680
     }
   },
-  "workerUrls" : [ "http://localhost:8081", "http://localhost:8082", "http://localhost:8083", "http://localhost:8084" ],
-  "lastSaved" : 1764209608412
+  "workerUrls" : [ "http://localhost:8084", "http://localhost:8083", "http://localhost:8082", "http://localhost:8081", "http://localhost:8086" ],
+  "lastSaved" : 1764541940871
 }

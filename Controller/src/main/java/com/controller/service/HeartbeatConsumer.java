@@ -1,5 +1,7 @@
 package com.controller.service;
 
+import com.controller.service.ClusterResyncService;
+import com.controller.service.WorkerRegistry;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Service;
 
@@ -9,12 +11,12 @@ import java.util.Map;
 public class HeartbeatConsumer {
 
     private final WorkerRegistry registry;
-    private final ClusterResyncService clusterResyncService;
+    private final ClusterResyncService resync;
 
     public HeartbeatConsumer(WorkerRegistry registry,
-                             ClusterResyncService clusterResyncService) {
+                             ClusterResyncService resync) {
         this.registry = registry;
-        this.clusterResyncService = clusterResyncService;
+        this.resync = resync;
     }
 
     @KafkaListener(topics = "worker-heartbeats", groupId = "controller-group")
@@ -23,6 +25,8 @@ public class HeartbeatConsumer {
         if (workerId == null) return;
 
         registry.updateHeartbeat(workerId);
-        clusterResyncService.resyncCluster();
+
+        // IMPORTANT: this triggers replica reassignment
+        resync.resyncCluster();
     }
 }

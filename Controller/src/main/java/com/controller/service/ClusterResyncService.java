@@ -9,34 +9,59 @@ public class ClusterResyncService {
 
     private final WorkerRegistry registry;
     private final ReplicaAssignmentService assignmentService;
-    private final ReplicaBroadcastService broadcastService;
+    private final ReplicationManager replication;
 
     private Set<String> lastAlive = new HashSet<>();
 
     public ClusterResyncService(WorkerRegistry registry,
                                 ReplicaAssignmentService assignmentService,
-                                ReplicaBroadcastService broadcastService) {
+                                ReplicationManager replication) {
         this.registry = registry;
         this.assignmentService = assignmentService;
-        this.broadcastService = broadcastService;
+        this.replication = replication;
     }
 
     public synchronized void resyncCluster() {
-        List<String> alive = registry.getAliveWorkers();
-        Set<String> aliveNow = new HashSet<>(alive);
+        List<String> alive = registry.getAliveWorkerUrls();
+        Set<String> aliveSet = new HashSet<>(alive);
 
-        if (aliveNow.equals(lastAlive)) return;
+        // detect worker recovery (new alive worker that wasn't there before)
+        for (String id : alive) {
+            if (!lastAlive.contains(id)) {
+                String url = registry.getUrl(id);
+                if (url != null) {
+                    System.out.println("Detected worker recovery: " + url);
+                    replication.recoverWorker(url);
+                }
+            }
+        }
 
-        var assignments = assignmentService.recomputeReplicas();
-        broadcastService.broadcastAssignments(assignments);
+        if (!aliveSet.equals(lastAlive)) {
+            var assignments = assignmentService.recomputeReplicas();
+            broadcast(assignments);
+        }
 
-        lastAlive = aliveNow;
-        System.out.println("Cluster resync: alive=" + aliveNow.size());
+        lastAlive = aliveSet;
     }
 
     public synchronized void forceResync() {
         var assignments = assignmentService.recomputeReplicas();
-        broadcastService.broadcastAssignments(assignments);
-        lastAlive = new HashSet<>(registry.getAliveWorkers());
+        broadcast(assignments);
+
+        // full replication after controller restarts
+        replication.recoverAll();
+
+        lastAlive = new HashSet<>(registry.getAliveWorkerUrls());
+    }
+
+    private void broadcast(Map<String, List<String>> assignments) {
+        assignments.forEach((workerUrl, replicas) -> {
+            try {
+                new org.springframework.web.client.RestTemplate()
+                        .postForEntity(workerUrl + "/replicas/update", replicas, Void.class);
+            } catch (Exception e) {
+                System.err.println("Failed to broadcast replicas to " + workerUrl + ": " + e.getMessage());
+            }
+        });
     }
 }

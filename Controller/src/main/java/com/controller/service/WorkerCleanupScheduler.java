@@ -4,19 +4,20 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
+import java.util.Map;
+
 @Service
 public class WorkerCleanupScheduler {
 
     private final WorkerRegistry registry;
-    private final ClusterResyncService clusterResyncService;
+    private final ClusterResyncService resync;
 
     @Value("${controller.heartbeat.timeout:15}")
-    private long timeoutSeconds;
+    private long timeout;
 
-    public WorkerCleanupScheduler(WorkerRegistry registry,
-                                  ClusterResyncService clusterResyncService) {
+    public WorkerCleanupScheduler(WorkerRegistry registry, ClusterResyncService resync) {
         this.registry = registry;
-        this.clusterResyncService = clusterResyncService;
+        this.resync = resync;
     }
 
     @Scheduled(fixedRate = 3000)
@@ -24,19 +25,18 @@ public class WorkerCleanupScheduler {
         long now = System.currentTimeMillis();
         boolean changed = false;
 
-        for (String worker : registry.getAllWorkers()) {
-            Long last = registry.getLastHeartbeat(worker);
+        for (String id : registry.getAllWorkerIds()) {
+            Long last = registry.getLastHeartbeat(id);
             if (last == null) continue;
 
-            if (now - last > timeoutSeconds * 1000) {
-                if (registry.markDead(worker)) {
-                    System.out.println("Worker DEAD → " + worker);
-                    changed = true;
-                }
+            if (now - last > timeout * 1000) {
+                String url = registry.markDead(id);
+                System.out.println("DEAD WORKER → " + id + " (" + url + ")");
+                changed = true;
             }
         }
 
-        if (changed)
-            clusterResyncService.resyncCluster();
+        if (changed) resync.resyncCluster();
     }
 }
+

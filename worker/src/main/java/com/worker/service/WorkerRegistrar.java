@@ -24,6 +24,10 @@ public class WorkerRegistrar {
         return workerId;
     }
 
+    public String getWorkerUrl() {
+        return "http://localhost:" + port;
+    }
+
     public void registerAfterReady() {
         String workerUrl = "http://localhost:" + port;
 
