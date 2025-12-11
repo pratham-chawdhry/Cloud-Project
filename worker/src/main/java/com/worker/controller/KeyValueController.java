@@ -2,12 +2,15 @@ package com.worker.controller;
 
 import com.worker.model.ApiResponse;
 import com.worker.model.KeyValue;
-import com.worker.service.FailureReporter;
+import com.worker.model.ReplicaInfo;
+import com.worker.model.ReplicaType;
 import com.worker.service.KeyValueStore;
 import com.worker.service.ReplicationService;
+import com.worker.service.WorkerRegistrar;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+
 import java.util.Map;
 
 @RestController
@@ -21,51 +24,126 @@ public class KeyValueController {
     private ReplicationService replicationService;
 
     @Autowired
-    private FailureReporter failureReporter;
+    private WorkerRegistrar workerRegistrar;
 
     @PostMapping("/put")
-    public ResponseEntity<ApiResponse<String>> put(@RequestBody Map<String, String> body) {
+    public ResponseEntity<ApiResponse<Object>> put(@RequestBody Map<String, String> body) {
+
+        String key = body.get("key");
+        String value = body.get("value");
+
+        if (key == null || value == null) {
+            return ResponseEntity.badRequest()
+                    .body(ApiResponse.fail(400, "Key and value required"));
+        }
+
+        KeyValue existing = keyValueStore.get(key);
+        boolean isUpdate = (existing != null);
+
+        String oldValue = null;
+        ReplicaInfo oldInfo = null;
+
+        if (isUpdate) {
+            oldValue = existing.getValue();
+            oldInfo = new ReplicaInfo(existing.getReplicaInfo());
+        }
+
         try {
-            String key = body.get("key");
-            String value = body.get("value");
+            String primaryUrl = workerRegistrar.getWorkerUrl();
+            String syncTarget;
+            String asyncTarget;
 
-            if (key == null || value == null)
-                return ResponseEntity.badRequest().body(ApiResponse.fail(400, "Key and value required"));
+            if (!isUpdate) {
+                Map<String, String> syncMeta =
+                        replicationService.syncReplicaCreate(key, value, null);
 
-            // 1. Local Write
-            keyValueStore.put(key, value);
+                syncTarget = syncMeta.get("syncReplica");
+                asyncTarget = syncMeta.get("asyncReplica");
 
-            // 2. Sync Replication
-            try {
-                replicationService.replicateSyncOrThrow(key, value);
-            } catch (Exception syncError) {
-                // Rollback local write
-                keyValueStore.remove(key);
-                failureReporter.reportSyncFailure(replicationService.getSyncReplica(), syncError.getMessage());
-                return ResponseEntity.status(503).body(ApiResponse.fail(503, "Sync replication failed, rolled back: " + syncError.getMessage()));
+                if (asyncTarget != null) {
+                    replicationService.replicateAsync(key, value, asyncTarget, syncTarget);
+                }
+
+            } else {
+                String oldSync = oldInfo.getSyncReplica();
+                String oldAsync = oldInfo.getAsyncReplica();
+
+                boolean ok = replicationService.syncUpdate(key, value, oldSync, oldAsync);
+                if (!ok) throw new Exception("SYNC update failed");
+
+                syncTarget = oldSync;
+                asyncTarget = oldAsync;
+
+                if (oldAsync != null) {
+                    replicationService.replicateAsync(key, value, oldAsync, syncTarget);
+                }
             }
 
-            // 3. Async Replication (Background)
-            replicationService.replicateAsync(key, value);
+            ReplicaInfo newInfo = new ReplicaInfo(
+                    primaryUrl,
+                    syncTarget,
+                    asyncTarget
+            );
 
-            return ResponseEntity.ok(ApiResponse.success(200, "Stored key=" + key));
+            keyValueStore.put(new KeyValue(key, ReplicaType.PRIMARY, value, newInfo));
+
+            return ResponseEntity.ok(ApiResponse.success(200, Map.of(
+                    "primaryReplica", primaryUrl,
+                    "syncReplica", syncTarget,
+                    "asyncReplica", asyncTarget
+            )));
 
         } catch (Exception e) {
-            return ResponseEntity.internalServerError().body(ApiResponse.fail(500, e.getMessage()));
+
+            if (!isUpdate) {
+                keyValueStore.remove(key);
+            } else {
+                keyValueStore.put(new KeyValue(key, ReplicaType.PRIMARY, oldValue, oldInfo));
+            }
+
+            return ResponseEntity.status(503)
+                    .body(ApiResponse.fail(
+                            503,
+                            "SYNC replication failed, rolled back: " + e.getMessage()
+                    ));
         }
     }
 
     @PostMapping("/replicate")
-    public ResponseEntity<ApiResponse<String>> replicate(@RequestBody Map<String, String> body) {
+    public ResponseEntity<ApiResponse<String>> replicate(@RequestBody Map<String, Object> body) {
         try {
-            String key = body.get("key");
-            String value = body.get("value");
-            if (key == null || value == null)
-                return ResponseEntity.badRequest().body(ApiResponse.fail(400, "Key and value required"));
-            keyValueStore.put(key, value);
-            return ResponseEntity.ok(ApiResponse.success(200, "Replicated key=" + key));
+            String key        = (String) body.get("key");
+            String value      = (String) body.get("value");
+            String primaryUrl = (String) body.get("primaryUrl");
+            String syncUrl    = (String) body.get("syncUrl");
+            String asyncUrl   = (String) body.get("asyncUrl"); // may be null
+
+            if (key == null || value == null || primaryUrl == null || syncUrl == null) {
+                return ResponseEntity.badRequest()
+                        .body(ApiResponse.fail(400, "key, value, primaryUrl, and syncUrl are required"));
+            }
+
+            ReplicaInfo info = new ReplicaInfo();
+            info.setPrimaryReplica(primaryUrl);
+            info.setSyncReplica(syncUrl);
+            info.setAsyncReplica(asyncUrl);
+
+            KeyValue kv = new KeyValue();
+            kv.setKey(key);
+            kv.setValue(value);
+            kv.setReplicaType(ReplicaType.SYNC);
+            kv.setReplicaInfo(info);
+
+            keyValueStore.put(kv);
+
+            return ResponseEntity.ok(
+                    ApiResponse.success(200,
+                            "Replicated key=" + key + " from " + primaryUrl)
+            );
+
         } catch (Exception e) {
-            return ResponseEntity.internalServerError().body(ApiResponse.fail(500, e.getMessage()));
+            return ResponseEntity.internalServerError()
+                    .body(ApiResponse.fail(500, "Error in /replicate: " + e.getMessage()));
         }
     }
 
@@ -73,14 +151,23 @@ public class KeyValueController {
     public ResponseEntity<ApiResponse<KeyValue>> get(@RequestBody Map<String, String> body) {
         try {
             String key = body.get("key");
-            if (key == null)
-                return ResponseEntity.badRequest().body(ApiResponse.fail(400, "Key required"));
-            String value = keyValueStore.get(key);
-            if (value == null)
-                return ResponseEntity.status(404).body(ApiResponse.fail(404, "Key not found"));
-            return ResponseEntity.ok(ApiResponse.success(200, new KeyValue(key, value)));
+            if (key == null || key.isBlank()) {
+                return ResponseEntity.badRequest()
+                        .body(ApiResponse.fail(400, "Key required"));
+            }
+
+            KeyValue kv = keyValueStore.get(key);
+
+            if (kv == null) {
+                return ResponseEntity.status(404)
+                        .body(ApiResponse.fail(404, "Key not found"));
+            }
+
+            return ResponseEntity.ok(ApiResponse.success(200, kv));
+
         } catch (Exception e) {
-            return ResponseEntity.internalServerError().body(ApiResponse.fail(500, e.getMessage()));
+            return ResponseEntity.internalServerError()
+                    .body(ApiResponse.fail(500, e.getMessage()));
         }
     }
 }

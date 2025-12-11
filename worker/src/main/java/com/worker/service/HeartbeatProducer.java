@@ -20,7 +20,7 @@ public class HeartbeatProducer {
         this.gate = gate;
     }
 
-    @Scheduled(fixedDelayString = "5000")
+    @Scheduled(fixedDelayString = "${worker.heartbeat.interval}")
     public void sendHeartbeat() {
 
         if (!gate.isEnabled()) return; // not ready yet

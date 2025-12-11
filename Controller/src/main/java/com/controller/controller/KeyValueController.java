@@ -1,8 +1,12 @@
 package com.controller.controller;
 
 import com.controller.model.ApiResponse;
+import com.controller.model.KeyMetadata;
 import com.controller.model.KeyValue;
+import com.controller.service.MetadataStore;
 import com.controller.service.WorkerManager;
+import jakarta.servlet.http.HttpServletRequest;
+import org.apache.kafka.clients.Metadata;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -25,6 +29,9 @@ public class KeyValueController {
     @Autowired
     private WorkerManager workerManager;
 
+    @Autowired
+    private MetadataStore metadataStore;
+
     @PutMapping("/put")
     public ResponseEntity<ApiResponse<String>> put(@RequestBody Map<String, String> body) {
         try {
@@ -46,17 +53,29 @@ public class KeyValueController {
             Map<String, String> request = Map.of("key", key, "value", value);
 
             try {
+                System.out.println(primaryWorker);
                 ResponseEntity<Map> response =
                         restTemplate.postForEntity(primaryWorker + "/put", request, Map.class);
 
-                if (response != null && response.getStatusCode().is2xxSuccessful())
-                    return ok("Stored key=" + key + " on " + primaryWorker);
+                if (response != null && response.getStatusCode().is2xxSuccessful()){
+                    Map<String, Object> resBody = response.getBody();
 
+                    if (resBody == null) return fail(503, "Invalid worker response");
+
+                    Map<String, Object> payload = (Map<String, Object>) resBody.get("payload");
+                    if (payload == null)
+                        return fail(503, "Worker sent empty payload");
+
+                    String syncReplica = (String) payload.get("syncReplica");
+
+                    KeyMetadata m = new KeyMetadata(primaryWorker, syncReplica, null);
+                    metadataStore.update(key, m);
+                    return ok("Stored key=" + key + " on " + primaryWorker + " and "  + syncReplica);
+                }
                 return fail(503, "Primary worker failed to store key");
             } catch (RestClientException re) {
                 return fail(503, "Failed to connect to primary worker: " + re.getMessage());
             }
-
         } catch (Exception e) {
             return fail(500, "Internal server error: " + e.getMessage());
         }
@@ -117,7 +136,53 @@ public class KeyValueController {
         }
     }
 
+    @PostMapping("/notify/async")
+    public ResponseEntity<ApiResponse<String>> notifyAsync(
+            @RequestBody Map<String, String> body,
+            HttpServletRequest request) {
 
+        try {
+            // 1. Key must exist
+            String key = body.get("key");
+            if (key == null || key.isBlank()) {
+                return ResponseEntity.badRequest()
+                        .body(ApiResponse.fail(400, "Key required"));
+            }
+
+            // 2. Worker URL MUST be sent explicitly by worker
+            String asyncWorkerUrl = body.get("worker");
+            if (asyncWorkerUrl == null || asyncWorkerUrl.isBlank()) {
+                return ResponseEntity.badRequest()
+                        .body(ApiResponse.fail(400, "Worker URL missing in notify/async request"));
+            }
+
+            System.out.println("Async replication completed by worker -> " + asyncWorkerUrl);
+
+            // 3. Fetch metadata
+            KeyMetadata meta = metadataStore.get(key);
+            if (meta == null) {
+                return ResponseEntity.status(404)
+                        .body(ApiResponse.fail(404, "No metadata exists for key=" + key));
+            }
+
+            // 4. Update ONLY asyncReplica
+            meta.setAsyncReplica(asyncWorkerUrl);
+
+            // 5. Save back to metadata.json
+            metadataStore.update(key, meta);
+
+            return ResponseEntity.ok(
+                    ApiResponse.success(
+                            200,
+                            "Async replica recorded: key=" + key + " worker=" + asyncWorkerUrl
+                    )
+            );
+
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError()
+                    .body(ApiResponse.fail(500, e.getMessage()));
+        }
+    }
     private Optional<Map.Entry<String, String>> extractSingleEntry(Map<String, String> body) {
         if (body == null || body.isEmpty()) return Optional.empty();
 

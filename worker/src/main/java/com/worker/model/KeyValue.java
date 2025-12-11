@@ -9,5 +9,7 @@ import lombok.NoArgsConstructor;
 @AllArgsConstructor
 public class KeyValue {
     private String key;
+    private ReplicaType replicaType;
     private String value;
+    private ReplicaInfo replicaInfo;
 }

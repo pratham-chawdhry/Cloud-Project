@@ -3,39 +3,46 @@
     "http://localhost:8084" : {
       "url" : "http://localhost:8084",
       "replicaUrls" : [ ],
-      "workerId" : "worker-9e0146aa",
+      "workerId" : "worker-b105155f",
       "active" : true,
-      "lastHeartbeat" : 1764541036089
+      "lastHeartbeat" : 1765488881566
     },
     "http://localhost:8083" : {
       "url" : "http://localhost:8083",
       "replicaUrls" : [ ],
-      "workerId" : "worker-d7321d98",
+      "workerId" : "worker-abba8617",
       "active" : true,
-      "lastHeartbeat" : 1764541040675
+      "lastHeartbeat" : 1765483516113
     },
     "http://localhost:8086" : {
       "url" : "http://localhost:8086",
       "replicaUrls" : [ ],
-      "workerId" : "worker-eaa6f8f4",
+      "workerId" : "worker-839390d1",
       "active" : true,
-      "lastHeartbeat" : 1764541940871
+      "lastHeartbeat" : 1765488072307
     },
     "http://localhost:8082" : {
       "url" : "http://localhost:8082",
       "replicaUrls" : [ ],
-      "workerId" : "worker-6705be2b",
+      "workerId" : "worker-261c122a",
       "active" : true,
-      "lastHeartbeat" : 1764541043431
+      "lastHeartbeat" : 1765488898028
     },
     "http://localhost:8081" : {
       "url" : "http://localhost:8081",
       "replicaUrls" : [ ],
-      "workerId" : "worker-97914558",
+      "workerId" : "worker-af2cf427",
       "active" : true,
-      "lastHeartbeat" : 1764541044680
+      "lastHeartbeat" : 1765488716983
+    },
+    "http://localhost:8087" : {
+      "url" : "http://localhost:8087",
+      "replicaUrls" : [ ],
+      "workerId" : "worker-f4a50757",
+      "active" : true,
+      "lastHeartbeat" : 1765488321380
     }
   },
-  "workerUrls" : [ "http://localhost:8084", "http://localhost:8083", "http://localhost:8082", "http://localhost:8081", "http://localhost:8086" ],
-  "lastSaved" : 1764541940871
+  "workerUrls" : [ "http://localhost:8083", "http://localhost:8086", "http://localhost:8087", "http://localhost:8081", "http://localhost:8084", "http://localhost:8082" ],
+  "lastSaved" : 1765488898028
 }

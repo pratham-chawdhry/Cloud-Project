@@ -1,4 +1,7 @@
 package com.worker.model;
 
-public class ReplicaType {
+public enum ReplicaType {
+    PRIMARY,
+    SYNC,
+    ASYNC,
 }

@@ -1,12 +1,14 @@
 package com.controller.service;
 
 import org.springframework.stereotype.Service;
+import org.springframework.web.client.RestTemplate;
 
 import java.util.*;
 
 @Service
 public class ClusterResyncService {
 
+    private final RestTemplate rest = new RestTemplate();
     private final WorkerRegistry registry;
     private final ReplicaAssignmentService assignmentService;
     private final ReplicationManager replication;
@@ -22,45 +24,46 @@ public class ClusterResyncService {
     }
 
     public synchronized void resyncCluster() {
-        List<String> alive = registry.getAliveWorkerUrls();
-        Set<String> aliveSet = new HashSet<>(alive);
+        List<String> aliveList = registry.getAliveWorkerUrls();
+        Set<String> aliveSet = new HashSet<>(aliveList);
 
-        // detect worker recovery (new alive worker that wasn't there before)
-        for (String id : alive) {
-            if (!lastAlive.contains(id)) {
-                String url = registry.getUrl(id);
-                if (url != null) {
-                    System.out.println("Detected worker recovery: " + url);
-                    replication.recoverWorker(url);
-                }
-            }
-        }
+        List<String> dead = lastAlive.stream()
+                .filter(id -> !aliveSet.contains(id))
+                .toList();
 
         if (!aliveSet.equals(lastAlive)) {
-            var assignments = assignmentService.recomputeReplicas();
-            broadcast(assignments);
+            broadcast(aliveSet, dead);
         }
 
         lastAlive = aliveSet;
     }
 
+
     public synchronized void forceResync() {
-        var assignments = assignmentService.recomputeReplicas();
-        broadcast(assignments);
+        Set<String> aliveWorkers = new HashSet<>(registry.getAliveWorkerUrls());
 
-        // full replication after controller restarts
+        broadcast(aliveWorkers, List.of());
+
         replication.recoverAll();
-
-        lastAlive = new HashSet<>(registry.getAliveWorkerUrls());
+        lastAlive = aliveWorkers;
     }
 
-    private void broadcast(Map<String, List<String>> assignments) {
-        assignments.forEach((workerUrl, replicas) -> {
+    private void broadcast(Set<String> aliveWorkers, List<String> deadWorkers) {
+        aliveWorkers.forEach(workerUrl -> {
             try {
-                new org.springframework.web.client.RestTemplate()
-                        .postForEntity(workerUrl + "/replicas/update", replicas, Void.class);
+                Map<String, Object> body = new HashMap<>();
+                body.put("deadWorkers", deadWorkers);
+                body.put("aliveWorkers", aliveWorkers);
+
+                rest.postForEntity(
+                        workerUrl + "/replicas/update",
+                        body,
+                        Void.class
+                );
+
             } catch (Exception e) {
-                System.err.println("Failed to broadcast replicas to " + workerUrl + ": " + e.getMessage());
+                System.err.println("Failed to broadcast cluster state to "
+                        + workerUrl + ": " + e.getMessage());
             }
         });
     }
