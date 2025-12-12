@@ -1,11 +1,18 @@
 {
   "workers" : {
+    "http://localhost:8087" : {
+      "url" : "http://localhost:8087",
+      "replicaUrls" : [ ],
+      "workerId" : "worker-8858668c",
+      "active" : true,
+      "lastHeartbeat" : 1765537114209
+    },
     "http://localhost:8084" : {
       "url" : "http://localhost:8084",
       "replicaUrls" : [ ],
-      "workerId" : "worker-b105155f",
+      "workerId" : "worker-2a98f62b",
       "active" : true,
-      "lastHeartbeat" : 1765488881566
+      "lastHeartbeat" : 1765537300554
     },
     "http://localhost:8083" : {
       "url" : "http://localhost:8083",
@@ -17,32 +24,25 @@
     "http://localhost:8086" : {
       "url" : "http://localhost:8086",
       "replicaUrls" : [ ],
-      "workerId" : "worker-839390d1",
+      "workerId" : "worker-5dbbcc5f",
       "active" : true,
-      "lastHeartbeat" : 1765488072307
+      "lastHeartbeat" : 1765537188344
     },
     "http://localhost:8082" : {
       "url" : "http://localhost:8082",
       "replicaUrls" : [ ],
-      "workerId" : "worker-261c122a",
+      "workerId" : "worker-3a279146",
       "active" : true,
-      "lastHeartbeat" : 1765488898028
+      "lastHeartbeat" : 1765536748599
     },
     "http://localhost:8081" : {
       "url" : "http://localhost:8081",
       "replicaUrls" : [ ],
-      "workerId" : "worker-af2cf427",
+      "workerId" : "worker-72de61c6",
       "active" : true,
-      "lastHeartbeat" : 1765488716983
-    },
-    "http://localhost:8087" : {
-      "url" : "http://localhost:8087",
-      "replicaUrls" : [ ],
-      "workerId" : "worker-f4a50757",
-      "active" : true,
-      "lastHeartbeat" : 1765488321380
+      "lastHeartbeat" : 1765536745825
     }
   },
-  "workerUrls" : [ "http://localhost:8083", "http://localhost:8086", "http://localhost:8087", "http://localhost:8081", "http://localhost:8084", "http://localhost:8082" ],
-  "lastSaved" : 1765488898028
+  "workerUrls" : [ "http://localhost:8083", "http://localhost:8081", "http://localhost:8082", "http://localhost:8087", "http://localhost:8086", "http://localhost:8084" ],
+  "lastSaved" : 1765537300554
 }

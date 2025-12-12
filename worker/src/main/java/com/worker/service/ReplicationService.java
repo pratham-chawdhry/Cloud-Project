@@ -265,14 +265,34 @@ public class ReplicationService {
 
             System.out.println("ASYNC STORED -> " + key + " from " + primaryUrl);
 
-            rest.postForEntity(
-                    "http://localhost:8080/notify/async",
-                    Map.of("key", key, "worker", myUrl),
-                    String.class
-            );
+//            rest.postForEntity(
+//                    "http://localhost:8080/notify/async",
+//                    Map.of("key", key, "worker", myUrl),
+//                    String.class
+//            );
 
         } catch (Exception e) {
             System.err.println("Async replication failed: " + e.getMessage());
+        }
+    }
+
+    public void notifyPrimaryToController(String key, String primaryUrl) {
+        try {
+            String controllerUrl = "http://localhost:8080/notify/primary";
+
+            Map<String, String> body = Map.of(
+                    "key", key,
+                    "worker", primaryUrl
+            );
+
+            new org.springframework.web.client.RestTemplate()
+                    .postForEntity(controllerUrl, body, String.class);
+
+            System.out.println("Notified controller about new primary for key="
+                    + key + " -> " + primaryUrl);
+
+        } catch (Exception e) {
+            System.err.println("Failed to notify primary to controller: " + e.getMessage());
         }
     }
 }

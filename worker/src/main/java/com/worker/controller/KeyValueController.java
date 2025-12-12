@@ -54,6 +54,7 @@ public class KeyValueController {
             String asyncTarget;
 
             if (!isUpdate) {
+                // NEW KEY → assign replicas
                 Map<String, String> syncMeta =
                         replicationService.syncReplicaCreate(key, value, null);
 
@@ -64,7 +65,10 @@ public class KeyValueController {
                     replicationService.replicateAsync(key, value, asyncTarget, syncTarget);
                 }
 
+                replicationService.notifyPrimaryToController(key, primaryUrl);
+
             } else {
+                // UPDATE on existing primary
                 String oldSync = oldInfo.getSyncReplica();
                 String oldAsync = oldInfo.getAsyncReplica();
 

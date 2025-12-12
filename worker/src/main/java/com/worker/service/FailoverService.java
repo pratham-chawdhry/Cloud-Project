@@ -47,6 +47,7 @@ public class FailoverService {
                     info.setSyncReplica(null);
                     info.setAsyncReplica(null);
                     kv.setReplicaType(ReplicaType.PRIMARY);
+                    replicationService.notifyPrimaryToController(key, myUrl);
                     return;
                 }
 
@@ -165,6 +166,7 @@ public class FailoverService {
         }
 
         kv.setReplicaType(ReplicaType.PRIMARY);
+        replicationService.notifyPrimaryToController(key, myUrl);
     }
 
     private void handleAsyncBecomesPrimary(String key, String value, ReplicaInfo info, KeyValue kv) {
@@ -199,6 +201,7 @@ public class FailoverService {
         }
 
         kv.setReplicaType(ReplicaType.PRIMARY);
+        replicationService.notifyPrimaryToController(key, myUrl);
     }
 
     private void handlePrimarySyncDeadOnly(String key, String value, ReplicaInfo info) {

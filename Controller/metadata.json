@@ -1,0 +1,27 @@
+{
+  "a" : {
+    "primaryReplica" : "http://localhost:8081",
+    "syncReplica" : "http://localhost:8084",
+    "asyncReplica" : null
+  },
+  "b" : {
+    "primaryReplica" : "http://localhost:8081",
+    "syncReplica" : "http://localhost:8086",
+    "asyncReplica" : null
+  },
+  "c" : {
+    "primaryReplica" : "http://localhost:8081",
+    "syncReplica" : "http://localhost:8084",
+    "asyncReplica" : null
+  },
+  "d" : {
+    "primaryReplica" : "http://localhost:8081",
+    "syncReplica" : "http://localhost:8087",
+    "asyncReplica" : null
+  },
+  "e" : {
+    "primaryReplica" : "http://localhost:8081",
+    "syncReplica" : "http://localhost:8084",
+    "asyncReplica" : null
+  }
+}

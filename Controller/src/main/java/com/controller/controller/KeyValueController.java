@@ -6,11 +6,9 @@ import com.controller.model.KeyValue;
 import com.controller.service.MetadataStore;
 import com.controller.service.WorkerManager;
 import jakarta.servlet.http.HttpServletRequest;
-import org.apache.kafka.clients.Metadata;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.client.RestClientException;
@@ -23,7 +21,6 @@ import java.util.*;
 public class KeyValueController {
 
     private static final Logger logger = LoggerFactory.getLogger(KeyValueController.class);
-
     private final RestTemplate restTemplate = new RestTemplate();
 
     @Autowired
@@ -46,95 +43,92 @@ public class KeyValueController {
             if (isBlank(key) || isBlank(value))
                 return fail(400, "Key and value are required");
 
-            String primaryWorker = workerManager.getWorkerForKey(key);
-            if (primaryWorker == null)
-                return fail(503, "No active workers available");
+            // Determine primary for key
+            KeyMetadata meta = metadataStore.get(key);
+            String primaryWorker;
+
+            if (meta == null) {
+                primaryWorker = workerManager.getWorkerForKey(key);
+                if (primaryWorker == null)
+                    return fail(503, "No active workers available");
+            } else {
+                primaryWorker = meta.getPrimaryReplica();
+            }
 
             Map<String, String> request = Map.of("key", key, "value", value);
 
-            try {
-                System.out.println(primaryWorker);
-                ResponseEntity<Map> response =
-                        restTemplate.postForEntity(primaryWorker + "/put", request, Map.class);
+            ResponseEntity<Map> response =
+                    restTemplate.postForEntity(primaryWorker + "/put", request, Map.class);
 
-                if (response != null && response.getStatusCode().is2xxSuccessful()){
-                    Map<String, Object> resBody = response.getBody();
-
-                    if (resBody == null) return fail(503, "Invalid worker response");
-
-                    Map<String, Object> payload = (Map<String, Object>) resBody.get("payload");
-                    if (payload == null)
-                        return fail(503, "Worker sent empty payload");
-
-                    String syncReplica = (String) payload.get("syncReplica");
-
-                    KeyMetadata m = new KeyMetadata(primaryWorker, syncReplica, null);
-                    metadataStore.update(key, m);
-                    return ok("Stored key=" + key + " on " + primaryWorker + " and "  + syncReplica);
-                }
+            if (response == null || !response.getStatusCode().is2xxSuccessful())
                 return fail(503, "Primary worker failed to store key");
-            } catch (RestClientException re) {
-                return fail(503, "Failed to connect to primary worker: " + re.getMessage());
-            }
+
+            Map<String, Object> resBody = response.getBody();
+            if (resBody == null) return fail(503, "Invalid worker response");
+
+            Map<String, Object> payload = (Map<String, Object>) resBody.get("payload");
+            if (payload == null)
+                return fail(503, "Worker sent empty payload");
+
+            // Worker sends sync replica
+            String syncReplica = (String) payload.get("syncReplica");
+
+            KeyMetadata newMeta = new KeyMetadata(primaryWorker, syncReplica, null);
+            metadataStore.update(key, newMeta);
+
+            return ok("Stored key=" + key + " on primary=" + primaryWorker + ", sync=" + syncReplica);
+
+        } catch (RestClientException re) {
+            return fail(503, "Failed to connect to primary worker: " + re.getMessage());
         } catch (Exception e) {
             return fail(500, "Internal server error: " + e.getMessage());
         }
     }
 
     @PostMapping("/get")
-    public ResponseEntity<ApiResponse<KeyValue>> get(@RequestBody Map<String, String> body) {
+    public ResponseEntity<ApiResponse<Map<String, Object>>> get(@RequestBody Map<String, String> body) {
         try {
             Optional<String> keyOpt = extractSingleKey(body);
             if (keyOpt.isEmpty() || isBlank(keyOpt.get()))
-                return failKV(400, "Key is required");
+                return ResponseEntity.status(400)
+                        .body(ApiResponse.fail(400, "Key is required"));
 
             String key = keyOpt.get();
 
-            String primary = workerManager.getWorkerForKey(key);
-            List<String> active = workerManager.getActiveWorkers();
+            KeyMetadata meta = metadataStore.get(key);
+            if (meta == null || meta.getPrimaryReplica() == null)
+                return ResponseEntity.status(404)
+                        .body(ApiResponse.fail(404, "No metadata available for key=" + key));
 
-            if (active.isEmpty() && primary == null)
-                return failKV(503, "No active workers available");
+            String primaryUrl = meta.getPrimaryReplica();
 
-            LinkedHashSet<String> workers = new LinkedHashSet<>();
-            if (primary != null) workers.add(primary);
-            workers.addAll(active);
+            Map<String, String> req = Map.of("key", key);
 
-            Map<String, String> request = Map.of("key", key);
+            // FETCH FULL DATA FROM PRIMARY
+            ResponseEntity<Map> response =
+                    restTemplate.postForEntity(primaryUrl + "/get", req, Map.class);
 
-            for (String worker : workers) {
-                if (isBlank(worker)) continue;
-                try {
-                    ResponseEntity<Map> response =
-                            restTemplate.postForEntity(worker + "/get", request, Map.class);
+            if (response == null || !response.getStatusCode().is2xxSuccessful())
+                return ResponseEntity.status(503)
+                        .body(ApiResponse.fail(503, "Primary replica unreachable"));
 
-                    if (response == null || !response.getStatusCode().is2xxSuccessful())
-                        continue;
+            Map<String, Object> bodyMap = response.getBody();
+            if (bodyMap == null || !bodyMap.containsKey("payload"))
+                return ResponseEntity.status(503)
+                        .body(ApiResponse.fail(503, "Invalid response from primary"));
 
-                    Map<String, Object> bodyMap = response.getBody();
-                    if (bodyMap == null || !bodyMap.containsKey("payload"))
-                        continue;
+            // The payload received from the primary worker
+            Map<String, Object> fullData = (Map<String, Object>) bodyMap.get("payload");
 
-                    Object payloadObj = bodyMap.get("payload");
-                    if (!(payloadObj instanceof Map)) continue;
+            // Return EXACT FULL DATA coming from primary
+            return ResponseEntity.ok(ApiResponse.success(200, fullData));
 
-                    Map<String, Object> payload = (Map<String, Object>) payloadObj;
-                    Object val = payload.get("value");
-
-                    KeyValue kv = new KeyValue();
-                    kv.setKey(key);
-                    kv.setValue(val != null ? val.toString() : null);
-
-                    return okKV(kv);
-
-                } catch (RestClientException ignored) {}
-            }
-
-            return failKV(404, "Key not found");
         } catch (Exception e) {
-            return failKV(500, "Internal server error: " + e.getMessage());
+            return ResponseEntity.status(500)
+                    .body(ApiResponse.fail(500, e.getMessage()));
         }
     }
+
 
     @PostMapping("/notify/async")
     public ResponseEntity<ApiResponse<String>> notifyAsync(
@@ -142,39 +136,61 @@ public class KeyValueController {
             HttpServletRequest request) {
 
         try {
-            // 1. Key must exist
             String key = body.get("key");
-            if (key == null || key.isBlank()) {
+            if (key == null || key.isBlank())
                 return ResponseEntity.badRequest()
                         .body(ApiResponse.fail(400, "Key required"));
-            }
 
-            // 2. Worker URL MUST be sent explicitly by worker
             String asyncWorkerUrl = body.get("worker");
-            if (asyncWorkerUrl == null || asyncWorkerUrl.isBlank()) {
+            if (asyncWorkerUrl == null || asyncWorkerUrl.isBlank())
                 return ResponseEntity.badRequest()
-                        .body(ApiResponse.fail(400, "Worker URL missing in notify/async request"));
-            }
+                        .body(ApiResponse.fail(400, "Worker URL missing"));
 
-            System.out.println("Async replication completed by worker -> " + asyncWorkerUrl);
-
-            // 3. Fetch metadata
             KeyMetadata meta = metadataStore.get(key);
-            if (meta == null) {
+            if (meta == null)
                 return ResponseEntity.status(404)
-                        .body(ApiResponse.fail(404, "No metadata exists for key=" + key));
-            }
+                        .body(ApiResponse.fail(404, "No metadata for key=" + key));
 
-            // 4. Update ONLY asyncReplica
             meta.setAsyncReplica(asyncWorkerUrl);
+            metadataStore.update(key, meta);
 
-            // 5. Save back to metadata.json
+            return ResponseEntity.ok(ApiResponse.success(
+                    200, "Async replica recorded key=" + key + " worker=" + asyncWorkerUrl));
+
+        } catch (Exception e) {
+            return ResponseEntity.internalServerError()
+                    .body(ApiResponse.fail(500, e.getMessage()));
+        }
+    }
+
+    @PostMapping("/notify/primary")
+    public ResponseEntity<ApiResponse<String>> notifyPrimary(@RequestBody Map<String, String> body) {
+
+        try {
+            String key = body.get("key");
+            String newPrimary = body.get("worker");
+
+            if (key == null || key.isBlank())
+                return ResponseEntity.badRequest()
+                        .body(ApiResponse.fail(400, "Key required"));
+
+            if (newPrimary == null || newPrimary.isBlank())
+                return ResponseEntity.badRequest()
+                        .body(ApiResponse.fail(400, "Worker URL missing"));
+
+            KeyMetadata meta = metadataStore.get(key);
+
+            if (meta == null)
+                meta = new KeyMetadata(newPrimary, null, null);
+            else
+                meta.setPrimaryReplica(newPrimary);
+
             metadataStore.update(key, meta);
 
             return ResponseEntity.ok(
                     ApiResponse.success(
                             200,
-                            "Async replica recorded: key=" + key + " worker=" + asyncWorkerUrl
+                            "Primary updated key=" + key + " newPrimary=" + newPrimary
                     )
             );
 
@@ -183,23 +199,21 @@ public class KeyValueController {
                     .body(ApiResponse.fail(500, e.getMessage()));
         }
     }
+
     private Optional<Map.Entry<String, String>> extractSingleEntry(Map<String, String> body) {
         if (body == null || body.isEmpty()) return Optional.empty();
-
         if (body.containsKey("key") && body.containsKey("value"))
             return Optional.of(Map.entry(body.get("key"), body.get("value")));
-
         if (body.size() == 1) {
             var e = body.entrySet().iterator().next();
             return Optional.of(Map.entry(e.getKey(), e.getValue()));
         }
-
         return Optional.empty();
     }
 
     private Optional<String> extractSingleKey(Map<String, String> body) {
         if (body == null || body.isEmpty()) return Optional.empty();
-        if (body.containsKey("key")) return Optional.ofNullable(body.get("key"));
+        if (body.containsKey("key")) return Optional.of(body.get("key"));
         if (body.size() == 1) return Optional.of(body.keySet().iterator().next());
         return Optional.empty();
     }
@@ -218,9 +232,5 @@ public class KeyValueController {
 
     private ResponseEntity<ApiResponse<KeyValue>> failKV(int code, String msg) {
         return ResponseEntity.status(code).body(ApiResponse.fail(code, msg));
-    }
-
-    private ResponseEntity<ApiResponse<KeyValue>> okKV(KeyValue kv) {
-        return ResponseEntity.ok(ApiResponse.success(200, kv));
     }
 }
